@@ -237,6 +237,33 @@ func (im *TXTRegistry) generateTXTRecord(r *endpoint.Endpoint) []*endpoint.Endpo
 	return endpoints
 }
 
+// generateOldTxtRecord generates only the "old" TXT records
+// This is to aid in the new ForceUpdate TXT record migration to only remove the "old" TXT record
+// when the providerSpecificForceUpdate field is true, indicating the "new" TXT record is missing.
+// We should not generate both TXT record formats in this case to prevent issues deleting non-existent records.
+func (im *TXTRegistry) generateOldTxtRecord(r *endpoint.Endpoint) []*endpoint.Endpoint {
+	// Missing TXT records are added to the set of changes.
+	// Obviously, we don't need any other TXT record for them.
+	if r.RecordType == endpoint.RecordTypeTXT {
+		return nil
+	}
+
+	endpoints := make([]*endpoint.Endpoint, 0)
+
+	if !im.mapper.recordTypeInAffix() && r.RecordType != endpoint.RecordTypeAAAA {
+		// old TXT record format
+		txt := endpoint.NewEndpoint(im.mapper.toTXTName(r.DNSName), endpoint.RecordTypeTXT, r.Labels.Serialize(true, im.txtEncryptEnabled, im.txtEncryptAESKey))
+		if txt != nil {
+			txt.WithSetIdentifier(r.SetIdentifier)
+			txt.Labels[endpoint.OwnedRecordLabelKey] = r.DNSName
+			txt.ProviderSpecific = r.ProviderSpecific
+			endpoints = append(endpoints, txt)
+		}
+	}
+
+	return endpoints
+}
+
 // ApplyChanges updates dns provider with the changes
 // for each created/deleted record it will also take into account TXT records for creation/deletion
 func (im *TXTRegistry) ApplyChanges(ctx context.Context, changes *plan.Changes) error {
@@ -274,7 +301,11 @@ func (im *TXTRegistry) ApplyChanges(ctx context.Context, changes *plan.Changes) 
 	for _, r := range filteredChanges.UpdateOld {
 		// when we updateOld TXT records for which value has changed (due to new label) this would still work because
 		// !!! TXT record value is uniquely generated from the Labels of the endpoint. Hence old TXT record can be uniquely reconstructed
-		filteredChanges.UpdateOld = append(filteredChanges.UpdateOld, im.generateTXTRecord(r)...)
+		if value, ok := r.GetProviderSpecificProperty(providerSpecificForceUpdate); ok && value == "true" {
+			filteredChanges.UpdateOld = append(filteredChanges.UpdateOld, im.generateOldTxtRecord(r)...)
+		} else {
+			filteredChanges.UpdateOld = append(filteredChanges.UpdateOld, im.generateTXTRecord(r)...)
+		}
 		// remove old version of record from cache
 		if im.cacheInterval > 0 {
 			im.removeFromCache(r)
